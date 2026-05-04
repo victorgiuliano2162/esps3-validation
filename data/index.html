@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Análise de Cana-de-Açúcar</title>
+
+    <!-- Carregando o Vue 3 via CDN -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+
+    <style>
+      /* Reset básico e paleta opaca de baixo contraste */
+      body,
+      html {
+        margin: 0;
+        padding: 0;
+        background-color: #121212; /* Fundo principal chumbo escuro */
+        color: #cccccc;
+        font-family: Arial, sans-serif;
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }
+
+      .card {
+        background-color: #1e1e1e; /* Cinza ligeiramente mais claro */
+        border: 1px solid #2a2a2a;
+        border-radius: 8px;
+        padding: 32px;
+        width: 100%;
+        max-width: 400px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        text-align: center;
+      }
+
+      h2 {
+        margin-top: 0;
+        color: #e0e0e0;
+        font-weight: normal;
+      }
+
+      .subtitle {
+        color: #7a7a7a;
+        font-size: 0.9em;
+        margin-bottom: 24px;
+      }
+
+      .file-drop-area {
+        border: 1px dashed #444444;
+        border-radius: 6px;
+        padding: 20px;
+        cursor: pointer;
+        background-color: #181818;
+        transition:
+          background-color 0.2s,
+          border-color 0.2s;
+        min-height: 160px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        overflow: hidden;
+      }
+
+      .file-drop-area:hover {
+        background-color: #222222;
+        border-color: #555555;
+      }
+
+      .placeholder-text {
+        color: #666666;
+      }
+
+      .hidden-input {
+        display: none;
+      }
+
+      .preview-img {
+        max-width: 100%;
+        max-height: 200px;
+        border-radius: 4px;
+        object-fit: contain;
+      }
+
+      .actions {
+        margin-top: 24px;
+      }
+
+      .btn-submit {
+        background-color: #2c2c2c;
+        color: #d0d0d0;
+        border: 1px solid #3d3d3d;
+        padding: 12px 24px;
+        font-size: 1em;
+        border-radius: 4px;
+        cursor: pointer;
+        width: 100%;
+        transition: background-color 0.2s;
+      }
+
+      .btn-submit:hover:not(:disabled) {
+        background-color: #383838;
+      }
+
+      .btn-submit:disabled {
+        background-color: #1a1a1a;
+        color: #4a4a4a;
+        border-color: #222222;
+        cursor: not-allowed;
+      }
+
+      .status-message {
+        margin-top: 20px;
+        padding: 12px;
+        border-radius: 4px;
+        font-size: 0.9em;
+        text-align: left;
+        word-wrap: break-word;
+      }
+
+      /* Cores de status adaptadas para baixa luminosidade */
+      .success {
+        background-color: #1a2e20;
+        color: #78a880;
+        border: 1px solid #24402d;
+      }
+
+      .error {
+        background-color: #331d1d;
+        color: #b86c6c;
+        border: 1px solid #4a2a2a;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Ponto de montagem do Vue -->
+    <div id="app">
+      <div class="card">
+        <h2>Análise de Folha de Cana</h2>
+        <p class="subtitle">Selecione uma imagem para inferência</p>
+
+        <!-- Área de seleção de arquivo com preview -->
+        <div class="file-drop-area" @click="triggerFileInput">
+          <span v-if="!imagePreview" class="placeholder-text"
+            >Clique para selecionar a foto</span
+          >
+          <img
+            v-else
+            :src="imagePreview"
+            alt="Preview da folha"
+            class="preview-img"
+          />
+
+          <input
+            type="file"
+            ref="fileInput"
+            @change="handleFileChange"
+            accept="image/jpeg, image/png"
+            class="hidden-input"
+          />
+        </div>
+
+        <div class="actions">
+          <button
+            @click="uploadImage"
+            :disabled="!selectedFile || isUploading"
+            class="btn-submit"
+          >
+            {{ isUploading ? 'Enviando para a S3...' : 'Analisar Imagem' }}
+          </button>
+        </div>
+
+        <!-- Exibição do JSON de resposta ou erros -->
+        <div v-if="responseMessage" :class="['status-message', statusType]">
+          {{ responseMessage }}
+        </div>
+      </div>
+    </div>
+
+    <!-- Lógica do Vue 3 usando Composition API -->
+    <script>
+      const { createApp, ref } = Vue;
+
+      createApp({
+        setup() {
+          const fileInput = ref(null);
+          const selectedFile = ref(null);
+          const imagePreview = ref(null);
+          const isUploading = ref(false);
+          const responseMessage = ref("");
+          const statusType = ref("");
+
+          // Mude para '/api/upload' quando for embarcar o HTML dentro do LittleFS da placa
+          const API_URL = "http://esp32.local/api/upload";
+
+          const triggerFileInput = () => {
+            fileInput.value.click();
+          };
+
+          const handleFileChange = (event) => {
+            const file = event.target.files[0];
+            if (file) {
+              selectedFile.value = file;
+              imagePreview.value = URL.createObjectURL(file);
+              responseMessage.value = "";
+            }
+          };
+
+          const uploadImage = async () => {
+            if (!selectedFile.value) return;
+
+            isUploading.value = true;
+            responseMessage.value = "";
+
+            const formData = new FormData();
+            formData.append("image", selectedFile.value);
+
+            try {
+              const response = await fetch(API_URL, {
+                method: "POST",
+                body: formData,
+              });
+
+              if (!response.ok) {
+                throw new Error(`Erro do servidor: ${response.status}`);
+              }
+
+              const data = await response.json();
+              statusType.value = "success";
+
+              // Exibe a mensagem que veio no JSON da ESP32
+              responseMessage.value = `Resposta da Placa: ${data.mensagem}`;
+            } catch (error) {
+              console.error(error);
+              statusType.value = "error";
+              responseMessage.value = `Falha na comunicação: ${error.message}`;
+            } finally {
+              isUploading.value = false;
+            }
+          };
+
+          return {
+            fileInput,
+            selectedFile,
+            imagePreview,
+            isUploading,
+            responseMessage,
+            statusType,
+            triggerFileInput,
+            handleFileChange,
+            uploadImage,
+          };
+        },
+      }).mount("#app");
+    </script>
+  </body>
+</html>
