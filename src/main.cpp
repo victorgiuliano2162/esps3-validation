@@ -14,18 +14,29 @@
 
 Adafruit_NeoPixel led(1, PIN_RGB, NEO_GRB + NEO_KHZ800);
 
-// é necessário para usar AyncWifiManager
 DNSServer dns;
 AsyncWebServer server(80);
 AsyncWiFiManager wm(&server, &dns);
 JPEGDEC jpeg;
 
-// --- GESTÃO DE MEMÓRIA (PSRAM) ---
-uint8_t* imageBuffer = nullptr;  // image memory adress
+// ---------------------------------------------------------------------------
+// Comunicação entre a task de inferência (Core 0) e o loop (Core 1)
+// ---------------------------------------------------------------------------
+static char inferenceResultJson[768] = {0};
+static bool inferenceRunning = false;
+
+// Flags e ponteiros para resposta assíncrona
+volatile bool inferenceComplete = false;
+TaskHandle_t InferenceTaskHandle = nullptr;
+
+// ---------------------------------------------------------------------------
+// Gestão de memória (PSRAM)
+// ---------------------------------------------------------------------------
+uint8_t* imageBuffer = nullptr;
 size_t currentImageSize = 0;
 const size_t MAX_IMAGE_SIZE = 3 * 1024 * 1024;
 
-float* features = nullptr;  // array rede neural
+float* features = nullptr;
 
 struct {
   int width;
@@ -34,102 +45,12 @@ struct {
   int target_h = EI_CLASSIFIER_INPUT_HEIGHT;
 } image_info;
 
-int JPEGDraw(JPEGDRAW* pDraw) {
-  // Aqui poderíamos fazer o redimensionamento (resizing) em tempo real.
-  // Para simplificar e garantir performance na S3, vamos focar na captura dos
-  // dados.
-  return 1;
-}
-
-// Função que o Edge Impulse usa para ler os pixels do buffer decodificado
-int get_feature_data(size_t offset, size_t length, float* out_ptr) {
-  // Esta função será expandida para converter os pixels do buffer para o
-  // formato do modelo Geralmente: (pixel_rgb >> 16 & 0xFF) / 255.0f etc.
-  return 0;
-}
-
-void run_inference(AsyncWebServerRequest* request) {
-  Serial.println("Iniciando Inferência...");
-
-  unsigned long start_time = millis();
-
-  // 1. Abrir o JPEG da PSRAM
-  if (jpeg.openRAM(imageBuffer, currentImageSize, JPEGDraw)) {
-    image_info.width = jpeg.getWidth();
-    image_info.height = jpeg.getHeight();
-
-    Serial.printf("Imagem: %dx%d\n", image_info.width, image_info.height);
-    jpeg.close();
-  }
-
-  // 2. Preparar o sinal para o classificador
-  ei_impulse_result_t result = {0};
-  signal_t signal;
-
-  // Aqui ligamos o buffer de pixels à função de extração do Edge Impulse
-  // Nota: Implementaremos a lógica de preenchimento de 'signal' na próxima
-  // etapa após validarmos o tempo de resposta básico.
-
-  // 3. Executar o Classificador
-  // EI_IMPULSE_OK significa sucesso
-  EI_IMPULSE_ERROR res = run_classifier(&signal, &result, false);
-
-  unsigned long end_time = millis();
-
-  // 4. Construir resposta JSON dinâmica
-  String jsonResponse = "{\"status\": \"sucesso\", \"tempo_ms\": " +
-                        String(end_time - start_time) + ", \"resultados\": [";
-
-  for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
-    jsonResponse +=
-        "{\"label\": \"" + String(result.classification[ix].label) + "\", ";
-    jsonResponse +=
-        "\"score\": " + String(result.classification[ix].value, 4) + "}";
-    if (ix < EI_CLASSIFIER_LABEL_COUNT - 1) jsonResponse += ",";
-  }
-  jsonResponse += "]}";
-
-  request->send(200, "application/json", jsonResponse);
-}
-
-void setupDefaultRoutes() {
-  // Rota OPTIONS para o Preflight do CORS (O navegador pergunta isso antes do
-  // POST)
-  server.on("/api/upload", HTTP_OPTIONS, [](AsyncWebServerRequest* request) {
-    AsyncWebServerResponse* response = request->beginResponse(204);
-    response->addHeader("Access-Control-Allow-Origin", "*");
-    response->addHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-    response->addHeader("Access-Control-Allow-Headers", "Content-Type");
-    request->send(response);
-  });
-
-  // 4. Configura o Endpoint de Upload (Recebendo POST em /api/upload)
-  server.on(
-      "/api/upload", HTTP_POST,
-      [](AsyncWebServerRequest* request) {
-        // Agora chamamos a inferência após o upload terminar
-        run_inference(request);
-      },
-      [](AsyncWebServerRequest* request, String filename, size_t index,
-         uint8_t* data, size_t len, bool final) {
-        if (index == 0) {
-          currentImageSize = 0;
-          memset(imageBuffer, 0, MAX_IMAGE_SIZE);
-        }
-        if (currentImageSize + len <= MAX_IMAGE_SIZE) {
-          memcpy(imageBuffer + currentImageSize, data, len);
-          currentImageSize += len;
-        }
-        if (final) {
-          Serial.printf("Upload concluido: %u bytes\n", currentImageSize);
-        }
-      });
-
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-    request->send(LittleFS, "/index.html", "text/html");
-  });
-}
-
+// ---------------------------------------------------------------------------
+// Protótipos
+// ---------------------------------------------------------------------------
+int JPEGDraw(JPEGDRAW* pDraw);
+int get_feature_data(size_t offset, size_t length, float* out_ptr);
+void inference_task(void* pvParameters);
 void imprimirMetricasMemoria() {
   Serial.println("\n--- STATUS DE MEMÓRIA ---");
 
@@ -164,54 +85,201 @@ void imprimirMetricasMemoria() {
   Serial.println("-------------------------\n");
 }
 
-// Callback do JPEGDEC: Intercepta cada bloco decodificado
-int JPEGDraw(JPEGDRAW *pDraw) {
-    int original_w = image_info.width;
-    int original_h = image_info.height;
-    int target_w = image_info.target_w;
-    int target_h = image_info.target_h;
+// ---------------------------------------------------------------------------
+// Callback do JPEGDEC
+// ---------------------------------------------------------------------------
+int JPEGDraw(JPEGDRAW* pDraw) {
+  uint32_t original_w = image_info.width;
+  uint32_t original_h = image_info.height;
+  uint32_t target_w = image_info.target_w;
+  uint32_t target_h = image_info.target_h;
 
-    // Iterar sobre todos os pixels deste bloco MCU (geralmente 16x16 ou 8x8)
-    for (int y = 0; y < pDraw->iHeight; y++) {
-        for (int x = 0; x < pDraw->iWidth; x++) {
-            
-            // Coordenadas reais do pixel na imagem original (Gigante)
-            int src_x = pDraw->x + x;
-            int src_y = pDraw->y + y;
+  for (int y = 0; y < pDraw->iHeight; y++) {
+    for (int x = 0; x < pDraw->iWidth; x++) {
+      uint32_t src_x = pDraw->x + x;
+      uint32_t src_y = pDraw->y + y;
+      uint32_t dst_x = (src_x * target_w) / original_w;
+      uint32_t dst_y = (src_y * target_h) / original_h;
 
-            // Mapeia para a coordenada de destino na IA (Ex: 96x96) usando Nearest Neighbor
-            int dst_x = (src_x * target_w) / original_w;
-            int dst_y = (src_y * target_h) / original_h;
-
-            // Garante que não vamos escrever fora do array da IA
-            if (dst_x < target_w && dst_y < target_h) {
-                
-                // Pega o pixel em formato RGB565 (16 bits)
-                uint16_t pixel = pDraw->pPixels[y * pDraw->iWidth + x];
-
-                // Extrai os canais R, G e B
-                uint8_t r = (pixel & 0xF800) >> 8;
-                uint8_t g = (pixel & 0x07E0) >> 3;
-                uint8_t b = (pixel & 0x001F) << 3;
-
-                // O Edge Impulse espera os canais empacotados em um int de 32 bits (0x00RRGGBB)
-                uint32_t rgb = (r << 16) | (g << 8) | b;
-
-                // Salva o pixel empacotado no array (convertido para float)
-                int dst_index = (dst_y * target_w) + dst_x;
-                features[dst_index] = (float)rgb;
-            }
-        }
+      if (dst_x < target_w && dst_y < target_h) {
+        uint16_t pixel = pDraw->pPixels[y * pDraw->iWidth + x];
+        uint8_t r = (pixel & 0xF800) >> 8;
+        uint8_t g = (pixel & 0x07E0) >> 3;
+        uint8_t b = (pixel & 0x001F) << 3;
+        uint32_t rgb = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+        features[(dst_y * target_w) + dst_x] = (float)rgb;
+      }
     }
-    return 1; // 1 = Continua a decodificação
+  }
+  return 1;
 }
 
-// Função que entrega o array processado para o modelo
-int get_feature_data(size_t offset, size_t length, float *out_ptr) {
-    memcpy(out_ptr, features + offset, length * sizeof(float));
-    return 0;
+int get_feature_data(size_t offset, size_t length, float* out_ptr) {
+  memcpy(out_ptr, features + offset, length * sizeof(float));
+  return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Task de inferência — roda no Core 0
+// ---------------------------------------------------------------------------
+void inference_task(void* pvParameters) {
+  while (true) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+    Serial.println("Core 0: iniciando inferência...");
+    unsigned long start_time = millis();
+
+    bool decodeOk = false;
+    if (jpeg.openRAM(imageBuffer, currentImageSize, JPEGDraw)) {
+      image_info.width = jpeg.getWidth();
+      image_info.height = jpeg.getHeight();
+      Serial.printf("Decodificando %dx%d -> %dx%d\n", image_info.width,
+                    image_info.height, image_info.target_w,
+                    image_info.target_h);
+      jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
+      jpeg.decode(0, 0, 0);
+      jpeg.close();
+      decodeOk = true;
+    }
+
+    if (!decodeOk) {
+      snprintf(inferenceResultJson, sizeof(inferenceResultJson),
+               "{\"status\":\"erro\",\"mensagem\":\"Falha ao ler o JPEG\"}");
+      inferenceComplete = true;
+      continue;
+    }
+
+    Serial.println("Executando a rede neural...");
+    ei_impulse_result_t result = {0};
+    signal_t signal;
+    signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
+    signal.get_data = &get_feature_data;
+
+    // Desliga o WDT do Core 0 durante a matemática pesada
+    disableCore0WDT();
+    EI_IMPULSE_ERROR res = run_classifier(&signal, &result, false);
+    enableCore0WDT();
+
+    unsigned long end_time = millis();
+
+    if (res != EI_IMPULSE_OK) {
+      snprintf(inferenceResultJson, sizeof(inferenceResultJson),
+               "{\"status\":\"erro\",\"mensagem\":\"Falha no classificador\"}");
+      inferenceComplete = true;
+      continue;
+    }
+
+    int written =
+        snprintf(inferenceResultJson, sizeof(inferenceResultJson),
+                 "{\"status\":\"sucesso\",\"tempo_ms\":%lu,\"resultados\":[",
+                 end_time - start_time);
+
+    for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
+      written += snprintf(
+          inferenceResultJson + written, sizeof(inferenceResultJson) - written,
+          "{\"label\":\"%s\",\"score\":%.4f}%s",
+          result.classification[ix].label, result.classification[ix].value,
+          (ix < EI_CLASSIFIER_LABEL_COUNT - 1) ? "," : "");
+    }
+    snprintf(inferenceResultJson + written,
+             sizeof(inferenceResultJson) - written, "]}");
+
+    Serial.printf("Core 0: inferencia finalizada em %lu ms\n",
+                  end_time - start_time);
+
+    // Avisa ao loop() que o JSON está pronto para envio
+    inferenceComplete = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rotas HTTP
+// ---------------------------------------------------------------------------
+void setupDefaultRoutes() {
+  server.on("/api/upload", HTTP_OPTIONS, [](AsyncWebServerRequest* request) {
+    AsyncWebServerResponse* response = request->beginResponse(204);
+    response->addHeader("Access-Control-Allow-Origin", "*");
+    response->addHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+    response->addHeader("Access-Control-Allow-Headers", "Content-Type");
+    request->send(response);
+  });
+
+  // CORS Preflight para a rota de resultados
+  server.on("/api/resultado", HTTP_OPTIONS, [](AsyncWebServerRequest* request) {
+    AsyncWebServerResponse* response = request->beginResponse(204);
+    response->addHeader("Access-Control-Allow-Origin", "*");
+    request->send(response);
+  });
+
+  // 1. ROTA DE UPLOAD (Responde rápido para não dar Timeout)
+  server.on(
+      "/api/upload", HTTP_POST,
+      [](AsyncWebServerRequest* request) {
+        if (inferenceRunning) {
+          request->send(429, "application/json",
+                        "{\"status\":\"erro\",\"mensagem\":\"Ocupado.\"}");
+          return;
+        }
+
+        inferenceRunning = true;
+        inferenceComplete = false;
+
+        // RESPONDE IMEDIATAMENTE! O navegador não morre de tédio esperando.
+        AsyncWebServerResponse* response = request->beginResponse(
+            200, "application/json", "{\"status\":\"processando\"}");
+        response->addHeader("Access-Control-Allow-Origin", "*");
+        request->send(response);
+
+        // Acorda o Core 0 para trabalhar
+        xTaskNotifyGive(InferenceTaskHandle);
+      },
+      // Callback dos bytes da imagem (Mantém exatamente o mesmo)
+      [](AsyncWebServerRequest* request, String filename, size_t index,
+         uint8_t* data, size_t len, bool final) {
+        if (index == 0) {
+          currentImageSize = 0;
+          Serial.printf("\nRecebendo: %s\n", filename.c_str());
+        }
+        if (currentImageSize + len <= MAX_IMAGE_SIZE) {
+          memcpy(imageBuffer + currentImageSize, data, len);
+          currentImageSize += len;
+        }
+        if (final) {
+          Serial.printf("Upload concluido: %u bytes\n", currentImageSize);
+        }
+      });
+
+  // 2. NOVA ROTA DE CONSULTA (O Vue.js vai bater aqui a cada 1 segundo)
+  server.on("/api/resultado", HTTP_GET, [](AsyncWebServerRequest* request) {
+    AsyncWebServerResponse* response;
+
+    if (inferenceComplete) {
+      // A IA terminou! Devolve o JSON real e reseta o sistema
+      response =
+          request->beginResponse(200, "application/json", inferenceResultJson);
+      inferenceComplete = false;
+      inferenceRunning = false;
+    } else if (inferenceRunning) {
+      // A IA ainda está suando no Core 0
+      response = request->beginResponse(200, "application/json",
+                                        "{\"status\":\"processando\"}");
+    } else {
+      response = request->beginResponse(200, "application/json",
+                                        "{\"status\":\"ocioso\"}");
+    }
+
+    response->addHeader("Access-Control-Allow-Origin", "*");
+    request->send(response);
+  });
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(LittleFS, "/index.html", "text/html");
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Setup
+// ---------------------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -225,51 +293,52 @@ void setup() {
   }
 
   if (!psramInit()) {
-    Serial.println("ERRO CRITICO: PSRAM não inicializou!");
-    while (1);  // Trava aqui se não houver memória
+    Serial.println("ERRO CRITICO: PSRAM nao inicializou!");
+    while (1);
   }
 
-  // 2. Aloca o buffer na PSRAM de forma segura
-  // MALLOC_CAP_SPIRAM força a alocação na RAM externa (8MB) e não na interna
-  // (SRAM)
   imageBuffer = (uint8_t*)heap_caps_malloc(MAX_IMAGE_SIZE, MALLOC_CAP_SPIRAM);
-
-  if (imageBuffer == nullptr) {
-    Serial.println("ERRO: Falha ao alocar buffer na PSRAM!");
-    while (1);
-  }
-  Serial.printf("Buffer de 3MB alocado na PSRAM. PSRAM Livre: %u bytes\n", ESP.getFreePsram());
-
   features = (float*)heap_caps_malloc(
-    EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE * sizeof(float), MALLOC_CAP_SPIRAM);
+      EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE * sizeof(float), MALLOC_CAP_SPIRAM);
 
-  if (features == nullptr) {
-    Serial.println("ERRO: Falha ao alocar buffer de features na PSRAM!");
-    while (1);
-  }
-
-  // Tenta conectar, se não conseguir, cria o AP "ESP32_Config"
   if (!wm.autoConnect("ESP32_S3_Config")) {
-    Serial.println("Falha na conexão e tempo esgotado");
+    Serial.println("Falha na conexao e tempo esgotado");
     ESP.restart();
   }
-
   Serial.print("Conectado! IP: ");
   Serial.println(WiFi.localIP());
 
-  // mDNS
   if (MDNS.begin(mdnsName)) {
     MDNS.addService("http", "tcp", 80);
     Serial.printf("Acesse: http://%s.local\n", mdnsName);
   }
 
+
   setupDefaultRoutes();
   server.begin();
   imprimirMetricasMemoria();
-  Serial.println("Modelo do chip: " + (String)ESP.getChipModel());
-  Serial.println("Núcleos do chip: " + (String)ESP.getChipCores());
+
+  xTaskCreatePinnedToCore(inference_task, "InferenceTask", 8192 * 2, nullptr, 1,
+                          &InferenceTaskHandle,
+                          0  // Core 0
+  );
 }
 
+// ---------------------------------------------------------------------------
+// Loop — O Responsável pelo Envio
+// ---------------------------------------------------------------------------
+void loop() {
+  static unsigned long lastUpdate = 0;
+  static long hue = 0;
+
+  if (millis() - lastUpdate >= 10) {
+    lastUpdate = millis();
+    led.setPixelColor(0, led.ColorHSV(hue, 255, 255));
+    led.show();
+    hue = (hue + 256) % 65536;
+  }
+}
+/*
 void loop() {
   for (long hue = 0; hue < 65536; hue += 256) {
     // Converte HSV para RGB
@@ -282,3 +351,4 @@ void loop() {
     delay(10);
   }
 }
+*/
