@@ -6,6 +6,7 @@
 #include <JPEGDEC.h>
 #include <LittleFS.h>
 #include <WiFi.h>
+#include <esp_task_wdt.h>
 
 #include "victor2162-project-1_inferencing.h"
 
@@ -95,6 +96,7 @@ int JPEGDraw(JPEGDRAW* pDraw) {
   uint32_t target_h = image_info.target_h;
 
   for (int y = 0; y < pDraw->iHeight; y++) {
+    //disableCore0WDT();
     for (int x = 0; x < pDraw->iWidth; x++) {
       uint32_t src_x = pDraw->x + x;
       uint32_t src_y = pDraw->y + y;
@@ -127,7 +129,9 @@ void inference_task(void* pvParameters) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
     Serial.println("Core 0: iniciando inferência...");
-    unsigned long start_time = millis();
+    esp_task_wdt_init(90, false); 
+    unsigned long decode_start_time = millis();
+    //disableCore0WDT();
 
     bool decodeOk = false;
     if (jpeg.openRAM(imageBuffer, currentImageSize, JPEGDraw)) {
@@ -141,11 +145,13 @@ void inference_task(void* pvParameters) {
       jpeg.close();
       decodeOk = true;
     }
+    unsigned long decode_end_time = millis();
 
     if (!decodeOk) {
       snprintf(inferenceResultJson, sizeof(inferenceResultJson),
                "{\"status\":\"erro\",\"mensagem\":\"Falha ao ler o JPEG\"}");
       inferenceComplete = true;
+      esp_task_wdt_init(5, false);
       continue;
     }
 
@@ -154,13 +160,13 @@ void inference_task(void* pvParameters) {
     signal_t signal;
     signal.total_length = EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE;
     signal.get_data = &get_feature_data;
+    unsigned long inference_start_time = millis();
 
     // Desliga o WDT do Core 0 durante a matemática pesada
-    disableCore0WDT();
     EI_IMPULSE_ERROR res = run_classifier(&signal, &result, false);
-    enableCore0WDT();
-
-    unsigned long end_time = millis();
+    //enableCore0WDT();
+    unsigned long inference_end_time = millis();
+    esp_task_wdt_init(5, false);
 
     if (res != EI_IMPULSE_OK) {
       snprintf(inferenceResultJson, sizeof(inferenceResultJson),
@@ -172,20 +178,22 @@ void inference_task(void* pvParameters) {
     int written =
         snprintf(inferenceResultJson, sizeof(inferenceResultJson),
                  "{\"status\":\"sucesso\",\"tempo_ms\":%lu,\"resultados\":[",
-                 end_time - start_time);
+                 inference_end_time - inference_start_time);
 
     for (size_t ix = 0; ix < EI_CLASSIFIER_LABEL_COUNT; ix++) {
       written += snprintf(
           inferenceResultJson + written, sizeof(inferenceResultJson) - written,
-          "{\"label\":\"%s\",\"score\":%.4f}%s",
+          "{\"label\":\"%s\",\"score\":%.4f}%s\n",
           result.classification[ix].label, result.classification[ix].value,
           (ix < EI_CLASSIFIER_LABEL_COUNT - 1) ? "," : "");
     }
     snprintf(inferenceResultJson + written,
              sizeof(inferenceResultJson) - written, "]}");
 
+    Serial.printf("Core 0: decodificação finalizada em %lu ms\n",
+                  decode_end_time - decode_start_time);
     Serial.printf("Core 0: inferencia finalizada em %lu ms\n",
-                  end_time - start_time);
+                  inference_end_time - inference_start_time);
 
     // Avisa ao loop() que o JSON está pronto para envio
     inferenceComplete = true;
@@ -312,7 +320,6 @@ void setup() {
     MDNS.addService("http", "tcp", 80);
     Serial.printf("Acesse: http://%s.local\n", mdnsName);
   }
-
 
   setupDefaultRoutes();
   server.begin();

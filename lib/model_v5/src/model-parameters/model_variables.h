@@ -41,7 +41,7 @@
 
 #include <stdint.h>
 #include "model_metadata.h"
-#include "tflite-model/tflite_learn_982368_3.h"
+#include "tflite-model/tflite_learn_982368_3_compiled.h"
 #include "edge-impulse-sdk/classifier/ei_model_types.h"
 #include "edge-impulse-sdk/classifier/inferencing_engines/engines.h"
 #include "edge-impulse-sdk/classifier/postprocessing/ei_postprocessing_common.h"
@@ -77,11 +77,13 @@ ei_model_dsp_t ei_dsp_blocks_982368_1[ei_dsp_blocks_982368_1_size] = {
         nullptr, // data normalization config
     }
 };
-const ei_config_tflite_graph_t ei_config_graph_982368_3 = {
+const ei_config_tflite_eon_graph_t ei_config_graph_982368_3 = {
     .implementation_version = 1,
-    .model = tflite_learn_982368_3,
-    .model_size = tflite_learn_982368_3_len,
-    .arena_size = tflite_learn_982368_3_arena_size
+    .model_init = &tflite_learn_982368_3_init,
+    .model_invoke = &tflite_learn_982368_3_invoke,
+    .model_reset = &tflite_learn_982368_3_reset,
+    .model_input = &tflite_learn_982368_3_input,
+    .model_output = &tflite_learn_982368_3_output,
 };
 
 const uint8_t ei_output_tensors_indices_982368_3[1] = { 0 };
@@ -91,8 +93,8 @@ ei_learning_block_config_tflite_graph_t ei_learning_block_config_982368_3 = {
     .block_id = 3,
     .output_tensors_indices = ei_output_tensors_indices_982368_3,
     .output_tensors_size = ei_output_tensors_size_982368_3,
-    .quantized = 0,
-    .compiled = 0,
+    .quantized = 1,
+    .compiled = 1,
     .graph_config = (void*)&ei_config_graph_982368_3,
     .dequantize_output = 0,
 };
@@ -111,6 +113,11 @@ const ei_learning_block_t ei_learning_blocks_982368_1[ei_learning_blocks_982368_
     },
 };
 
+ei_fill_result_classification_i8_config_t ei_fill_result_classification_i8_config_982368_3 = {
+    .zero_point = -128,
+    .scale = 0.00390625
+};
+
 const size_t ei_postprocessing_blocks_982368_1_size = 1;
 const ei_postprocessing_block_t ei_postprocessing_blocks_982368_1[ei_postprocessing_blocks_982368_1_size] = {
     {
@@ -118,9 +125,9 @@ const ei_postprocessing_block_t ei_postprocessing_blocks_982368_1[ei_postprocess
         .type = EI_CLASSIFIER_MODE_CLASSIFICATION,
         .init_fn = NULL,
         .deinit_fn = NULL,
-        .postprocess_fn = &process_classification_f32,
+        .postprocess_fn = &process_classification_i8,
         .display_fn = NULL,
-        .config = NULL,
+        .config = (void*)&ei_fill_result_classification_i8_config_982368_3,
         .input_block_id = 3
     },
 };
@@ -135,7 +142,7 @@ const ei_impulse_t impulse_982368_1 = {
     .project_name = "victor2162-project-1",
     .impulse_id = 1,
     .impulse_name = "Impulse #1",
-    .deploy_version = 2,
+    .deploy_version = 5,
 
     .nn_input_frame_size = 76800,
     .raw_sample_count = 25600,

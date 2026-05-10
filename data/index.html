@@ -20,6 +20,8 @@
         display: flex;
         justify-content: center;
         align-items: center;
+
+        scrollbar-gutter: stable;
       }
 
       .card {
@@ -217,10 +219,11 @@
             try {
               // 1. A MÁGICA: Converte qualquer imagem para JPEG usando Canvas
               const jpegBlob = await convertToJPEG(selectedFile.value);
-
+              const originalName = selectedFile.value.name.split('.').slice(0, -1).join('.');
+              const fileName = `${originalName}-covertida.jpg`;
               const formData = new FormData();
               // Enviamos o Blob convertido fingindo que é um arquivo .jpg
-              formData.append("image", jpegBlob, "imagem_convertida.jpg");
+              formData.append("image", jpegBlob, fileName);
 
               responseMessage.value = "Enviando para a ESP32...";
 
