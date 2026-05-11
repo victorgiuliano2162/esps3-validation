@@ -1,4 +1,3 @@
-#include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
 #include <ESPAsyncWebServer.h>
 #include <ESPAsyncWiFiManager.h>
@@ -7,6 +6,8 @@
 #include <LittleFS.h>
 #include <WiFi.h>
 #include <esp_task_wdt.h>
+#include <Adafruit_NeoPixel.h>
+#include <esp_nn.h>
 
 #include "victor2162-project-1_inferencing.h"
 

@@ -1,13 +1,15 @@
 {
-  "name": "model_v5",
+  "name": "victor2162-project-1_inferencing",
   "version": "1.0.5",
   "build": {
     "srcFilter": [
       "+<*>",
-      "+<src/edge-impulse-sdk/porting/espressif/ESP-NN/src/**>"
-    ],
-    "flags": [
-      "-mlongcalls"
+      "+<src/edge-impulse-sdk/porting/espressif/ESP-NN/src/activation_functions/*.S>",
+      "+<src/edge-impulse-sdk/porting/espressif/ESP-NN/src/basic_math/*.S>",
+      "+<src/edge-impulse-sdk/porting/espressif/ESP-NN/src/common/*.S>",
+      "+<src/edge-impulse-sdk/porting/espressif/ESP-NN/src/convolution/*.S>",
+      "+<src/edge-impulse-sdk/porting/espressif/ESP-NN/src/fully_connected/*.S>",
+      "+<src/edge-impulse-sdk/porting/espressif/ESP-NN/src/pooling/*.S>"
     ]
   }
 }
